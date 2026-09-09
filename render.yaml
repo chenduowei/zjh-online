@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: zjh-online
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install --registry https://registry.npmjs.org && npm run build
+    startCommand: npx tsx server.mjs
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: HOSTNAME
+        value: "0.0.0.0"

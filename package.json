@@ -1,0 +1,33 @@
+{
+  "name": "zjh-online",
+  "version": "0.7.1",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "dev:online": "tsx server.mjs",
+    "build": "next build",
+    "start": "tsx server.mjs",
+    "start:local": "next start",
+    "test": "tsx --test src/game/__tests__/*.test.ts",
+    "demo": "tsx src/game/demo.ts"
+  },
+  "dependencies": {
+    "next": "15.5.7",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.1.12",
+    "@types/node": "22.10.0",
+    "@types/react": "19.1.10",
+    "@types/react-dom": "19.1.7",
+    "tailwindcss": "4.1.12",
+    "typescript": "5.7.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
