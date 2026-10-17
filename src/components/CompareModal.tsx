@@ -1,11 +1,11 @@
 'use client';
 
-import type { CompareResult, PublicPlayerView } from '@/game/engine';
+import type { PublicCompareResult, PublicPlayerView } from '@/game/engine';
 import { PokerCard } from './PokerCard';
 import { sound } from '@/lib/sound';
 
 interface Props {
-  result: CompareResult | null;
+  result: PublicCompareResult | null;
   players: PublicPlayerView[];
   humanId: string;
   onClose: () => void;
@@ -23,6 +23,8 @@ export function CompareModal({ result, players, humanId, onClose }: Props) {
   const targetName = displayName(result.targetId, players, humanId);
   const winnerName = displayName(result.winnerId, players, humanId);
   const wonByHuman = result.winnerId === humanId;
+  // 旁观者收不到手牌：只展示结果，不展示牌面
+  const showHands = Boolean(result.challengerHand && result.targetHand);
 
   return (
     <div className="compare-mask" role="dialog" aria-modal="true" aria-label="比牌结果">
@@ -30,29 +32,35 @@ export function CompareModal({ result, players, humanId, onClose }: Props) {
         <p className="compare-kicker">亮牌比牌</p>
         <h2>比牌</h2>
 
-        <div className="compare-hands">
-          <div className={`compare-side ${result.winnerId === result.challengerId ? 'winner' : ''}`}>
-            <p className="compare-name">{challengerName}</p>
-            <div className="compare-cards">
-              {result.challengerHand.cards.map((card, index) => (
-                <PokerCard key={card.id} card={card} dealDelay={index * 90} reveal />
-              ))}
+        {showHands ? (
+          <div className="compare-hands">
+            <div className={`compare-side ${result.winnerId === result.challengerId ? 'winner' : ''}`}>
+              <p className="compare-name">{challengerName}</p>
+              <div className="compare-cards">
+                {result.challengerHand!.cards.map((card, index) => (
+                  <PokerCard key={card.id} card={card} dealDelay={index * 90} reveal />
+                ))}
+              </div>
+              <p className="compare-label">{result.challengerHand!.label}</p>
             </div>
-            <p className="compare-label">{result.challengerHand.label}</p>
-          </div>
 
-          <div className="compare-versus" aria-hidden="true">VS</div>
+            <div className="compare-versus" aria-hidden="true">VS</div>
 
-          <div className={`compare-side ${result.winnerId === result.targetId ? 'winner' : ''}`}>
-            <p className="compare-name">{targetName}</p>
-            <div className="compare-cards">
-              {result.targetHand.cards.map((card, index) => (
-                <PokerCard key={card.id} card={card} dealDelay={index * 90 + 120} reveal />
-              ))}
+            <div className={`compare-side ${result.winnerId === result.targetId ? 'winner' : ''}`}>
+              <p className="compare-name">{targetName}</p>
+              <div className="compare-cards">
+                {result.targetHand!.cards.map((card, index) => (
+                  <PokerCard key={card.id} card={card} dealDelay={index * 90 + 120} reveal />
+                ))}
+              </div>
+              <p className="compare-label">{result.targetHand!.label}</p>
             </div>
-            <p className="compare-label">{result.targetHand.label}</p>
           </div>
-        </div>
+        ) : (
+          <p className="compare-versus-text">
+            {challengerName} 与 {targetName} 比牌
+          </p>
+        )}
 
         <p className="compare-result">{winnerName} 胜</p>
         <button

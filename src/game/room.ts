@@ -5,15 +5,35 @@
 
 import {
   ZjhEngine,
+  publicCompareFor,
   type Action,
   type CompareResult,
+  type PublicCompareResult,
   type GameSnapshot,
   type GameConfig,
 } from './engine';
 
+/** 生成重连凭证；非安全上下文下 crypto.randomUUID 不可用时降级 */
+function newToken(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  return `t-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+}
+
 export type RoomPhase = 'lobby' | 'playing' | 'finished';
 
 export interface RoomPlayer {
+  id: string;
+  name: string;
+  seat: number;
+  connected: boolean;
+  isHost: boolean;
+  /** 重连凭证：只发给本人，绝不广播 */
+  token: string;
+}
+
+/** 广播给客户端的玩家视图（不含 token） */
+export interface PublicRoomPlayer {
   id: string;
   name: string;
   seat: number;
@@ -24,13 +44,13 @@ export interface RoomPlayer {
 export interface RoomState {
   code: string;
   phase: RoomPhase;
-  players: RoomPlayer[];
+  players: PublicRoomPlayer[];
   maxPlayers: number;
   hostId: string;
   snapshot: GameSnapshot | null;
   lastEvent: string;
-  /** 最新一次公开的比牌，用于双方同步亮牌演出 */
-  lastCompare?: CompareResult;
+  /** 最新一次比牌：当事人可见双方手牌做亮牌演出，旁观者只收结果 */
+  lastCompare?: PublicCompareResult;
   config: Partial<GameConfig>;
 }
 
@@ -57,12 +77,16 @@ export class GameRoom {
     this.addPlayer(hostId, hostName, true);
   }
 
-  addPlayer(id: string, name: string, isHost = false): { ok: boolean; error?: string } {
+  addPlayer(
+    id: string,
+    name: string,
+    isHost = false,
+  ): { ok: boolean; error?: string; token?: string } {
     if (this.players.has(id)) {
       const p = this.players.get(id)!;
       p.connected = true;
       p.name = name;
-      return { ok: true };
+      return { ok: true, token: p.token };
     }
     if (this.players.size >= this.maxPlayers) {
       return { ok: false, error: '房间已满' };
@@ -71,15 +95,49 @@ export class GameRoom {
       return { ok: false, error: '对局进行中，无法加入' };
     }
     const seat = this.players.size;
+    const token = newToken();
     this.players.set(id, {
       id,
       name,
       seat,
       connected: true,
       isHost: isHost || id === this.hostId,
+      token,
     });
     this.lastEvent = `${name} 加入了房间`;
-    return { ok: true };
+    return { ok: true, token };
+  }
+
+  /** 取某玩家的重连凭证（仅服务端用，发给本人） */
+  playerToken(id: string): string | undefined {
+    return this.players.get(id)?.token;
+  }
+
+  /** 用凭证找回玩家（重连用），找不到返回 undefined */
+  findByToken(token: string): RoomPlayer | undefined {
+    if (!token) return undefined;
+    for (const p of this.players.values()) {
+      if (p.token === token) return p;
+    }
+    return undefined;
+  }
+
+  /** 凭 token 重连回座：不断座位、不丢筹码 */
+  reconnect(token: string, name?: string): RoomPlayer | null {
+    const p = this.findByToken(token);
+    if (!p) return null;
+    p.connected = true;
+    if (name) p.name = name;
+    this.lastEvent = `${p.name} 重新连接`;
+    return p;
+  }
+
+  /** 当前轮到行动的玩家 id；不在下注阶段时返回 null */
+  getActingPlayerId(): string | null {
+    if (!this.engine || this.engine.getPhase() !== 'betting') return null;
+    const snap = this.engine.getSnapshot();
+    if (snap.actingSeat < 0) return null;
+    return snap.players.find((p) => p.seat === snap.actingSeat)?.id ?? null;
   }
 
   removePlayer(id: string): void {
@@ -161,14 +219,19 @@ export class GameRoom {
       code: this.code,
       phase,
       players: players.map((p) => ({
-        ...p,
+        id: p.id,
+        name: p.name,
+        seat: p.seat,
+        connected: p.connected,
         isHost: p.id === this.hostId,
       })),
       maxPlayers: this.maxPlayers,
       hostId: this.hostId,
       snapshot,
       lastEvent: this.lastEvent,
-      lastCompare: this.lastCompare,
+      lastCompare: this.lastCompare
+        ? publicCompareFor(viewerId, this.lastCompare)
+        : undefined,
       config: this.config,
     };
   }

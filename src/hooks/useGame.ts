@@ -3,10 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ZjhEngine,
+  publicCompareFor,
   type Action,
   type ActionType,
   type CompareResult,
   type GameSnapshot,
+  type PublicCompareResult,
   type PublicPlayerView,
 } from '@/game/engine';
 import { evaluateHand, HandType } from '@/game/rules';
@@ -108,7 +110,7 @@ export function useGame() {
   const [busy, setBusy] = useState(false);
   const [soundOn, setSoundOn] = useState(true);
   const [handResult, setHandResult] = useState<HandResultState | null>(null);
-  const [compareReveal, setCompareReveal] = useState<CompareResult | null>(null);
+  const [compareReveal, setCompareReveal] = useState<PublicCompareResult | null>(null);
   const [session, setSession] = useState<SessionStats>(emptySession);
 
   const prevActing = useRef<number>(-1);
@@ -254,11 +256,16 @@ export function useGame() {
         if (result.ok) {
           setMessage(eng.getSnapshot().lastEvent ?? '');
           if (result.compare) {
-            const w = snap.players.find((p) => p.id === result.compare!.winnerId)?.name;
-            const line = `比牌 ${result.compare.challengerHand.label} vs ${result.compare.targetHand.label} → ${w} 胜`;
+            // AI 之间比牌不对人类亮牌，只展示结果
+            const pub = publicCompareFor(HUMAN_ID, result.compare);
+            const w = snap.players.find((p) => p.id === pub.winnerId)?.name;
+            const line =
+              pub.challengerHand && pub.targetHand
+                ? `比牌 ${pub.challengerHand.label} vs ${pub.targetHand.label} → ${w} 胜`
+                : `比牌 → ${w} 胜`;
             setMessage(line);
             showToast(line, 'info');
-            setCompareReveal(result.compare);
+            setCompareReveal(pub);
           } else if (action.type === 'fold') {
             showToast(`${actor.name} 弃牌`, 'info');
           }
@@ -326,11 +333,12 @@ export function useGame() {
       }
       if (r.compare) {
         const snap = eng.getSnapshot();
-        const w = snap.players.find((p) => p.id === r.compare!.winnerId)?.name;
-        const line = `比牌：${r.compare.challengerHand.label} vs ${r.compare.targetHand.label} → ${w} 胜`;
+        const pub = publicCompareFor(HUMAN_ID, r.compare);
+        const w = snap.players.find((p) => p.id === pub.winnerId)?.name;
+        const line = `比牌：${pub.challengerHand!.label} vs ${pub.targetHand!.label} → ${w} 胜`;
         setMessage(line);
-        showToast(line, r.compare.winnerId === HUMAN_ID ? 'win' : 'lose');
-        setCompareReveal(r.compare);
+        showToast(line, pub.winnerId === HUMAN_ID ? 'win' : 'lose');
+        setCompareReveal(pub);
       } else {
         setMessage(eng.getSnapshot().lastEvent ?? '');
         if (action.type === 'look') showToast('已看牌 · 后续按 2 倍注', 'info');

@@ -99,6 +99,31 @@ export interface CompareResult {
   targetHand: HandResult;
 }
 
+/** 裁剪后的比牌结果：仅当事人可见双方手牌，旁观者只收结果 */
+export interface PublicCompareResult {
+  challengerId: string;
+  targetId: string;
+  winnerId: string;
+  loserId: string;
+  challengerHand?: HandResult;
+  targetHand?: HandResult;
+}
+
+/**
+ * 按视角裁剪比牌结果，防止旁观者偷看仍在局中的赢家手牌。
+ * 当事人（挑战者/被挑战者）拿完整手牌做亮牌演出，其他人只拿结果。
+ */
+export function publicCompareFor(
+  viewerId: string | undefined,
+  compare: CompareResult,
+): PublicCompareResult {
+  const { challengerHand, targetHand, ...rest } = compare;
+  if (viewerId === compare.challengerId || viewerId === compare.targetId) {
+    return { ...rest, challengerHand, targetHand };
+  }
+  return rest;
+}
+
 export interface ActionResult {
   ok: boolean;
   error?: string;
@@ -156,6 +181,8 @@ export class ZjhEngine {
   private actedThisRound = new Set<number>();
   private lastEvent = '';
   private winnerIds: string[] = [];
+  /** 上一局是否打到摊牌：只有摊牌才公开所有人手牌，弃牌获胜不亮牌 */
+  private lastHandWentToShowdown = false;
   private deck: Card[] = [];
 
   constructor(config: Partial<GameConfig> = {}) {
@@ -202,6 +229,14 @@ export class ZjhEngine {
     if (this.phase !== 'idle' && this.phase !== 'finished') {
       return { ok: false, error: '当前阶段不能开局' };
     }
+    // 破产保护：筹码不够底注的玩家自动补满，避免房间进死胡同
+    const toppedUp: string[] = [];
+    for (const p of this.players) {
+      if (p.chips < this.config.ante) {
+        p.chips = this.config.startingChips;
+        toppedUp.push(p.name);
+      }
+    }
     const alive = this.players.filter((p) => p.chips >= this.config.ante);
     if (alive.length < this.config.minPlayers) {
       return { ok: false, error: `至少需要 ${this.config.minPlayers} 名有足够筹码的玩家` };
@@ -213,6 +248,7 @@ export class ZjhEngine {
     this.currentRound = 0;
     this.actedThisRound.clear();
     this.winnerIds = [];
+    this.lastHandWentToShowdown = false;
     this.phase = 'ante';
 
     // 只让有筹码的玩家入局
@@ -252,6 +288,9 @@ export class ZjhEngine {
     this.actingSeat = this.nextActiveSeat(this.dealerSeat);
     this.actedThisRound.clear();
     this.lastEvent = `第 ${this.currentRound} 轮开始，底池 ${this.pot}`;
+    if (toppedUp.length > 0) {
+      this.lastEvent += `；${toppedUp.join('、')} 破产，已补满筹码`;
+    }
 
     return { ok: true };
   }
@@ -444,7 +483,7 @@ export class ZjhEngine {
     // 检查是否只剩一人
     const stillIn = this.playersInHand();
     if (stillIn.length <= 1) {
-      return { ...result, ...this.finishHand(stillIn.map((p) => p.id)) };
+      return { ...result, ...this.finishHand() };
     }
 
     return { ...result, ...this.afterAction() };
@@ -455,7 +494,7 @@ export class ZjhEngine {
   private afterAction(): ActionResult {
     const stillIn = this.playersInHand();
     if (stillIn.length <= 1) {
-      return this.finishHand(stillIn.map((p) => p.id));
+      return this.finishHand();
     }
 
     // 找下一位可行动玩家
@@ -507,56 +546,107 @@ export class ZjhEngine {
 
   private doShowdown(): ActionResult {
     this.phase = 'showdown';
-    const contenders = this.playersInHand();
-    if (contenders.length === 0) {
-      return this.finishHand([]);
-    }
-    if (contenders.length === 1) {
-      return this.finishHand([contenders[0]!.id]);
-    }
-
-    // 多人数摊牌，找最大牌
-    const results = contenders.map((p) => ({
-      player: p,
-      hand: evaluateHand(p.cards),
-    }));
-    let best = results[0]!;
-    const winners: string[] = [best.player.id];
-    for (let i = 1; i < results.length; i++) {
-      const cmp = compareHands(results[i]!.hand, best.hand);
-      if (cmp > 0) {
-        best = results[i]!;
-        winners.length = 0;
-        winners.push(best.player.id);
-      } else if (cmp === 0) {
-        winners.push(results[i]!.player.id);
-      }
-    }
-    this.lastEvent = `摊牌，获胜者：${winners.map((id) => this.players.find((p) => p.id === id)!.name).join('、')}`;
-    return this.finishHand(winners);
+    this.lastHandWentToShowdown = true;
+    return this.finishHand();
   }
 
-  private finishHand(winnerIds: string[]): ActionResult {
+  /**
+   * 结算：按每人本局总投入分层建边池，每层独立按牌力找赢家。
+   * - 只剩一人：拿走整个底池（无需分层）。
+   * - 某层无人有资格（如唯一出资者已弃牌）：该层原路退回给出资者。
+   */
+  private finishHand(): ActionResult {
     this.phase = 'finished';
-    this.winnerIds = winnerIds;
     this.actingSeat = -1;
 
-    if (winnerIds.length === 0) {
-      // 极端情况，筹码退回（不应发生）
+    const inHand = this.playersInHand();
+    const winners: string[] = [];
+
+    if (inHand.length === 0) {
+      // 极端情况（不应发生）
+      this.winnerIds = [];
       this.lastEvent = '流局';
       return { ok: true, finished: true, winnerIds: [] };
     }
 
-    const share = Math.floor(this.pot / winnerIds.length);
-    const remainder = this.pot % winnerIds.length;
-    winnerIds.forEach((id, i) => {
-      const p = this.players.find((pl) => pl.id === id)!;
-      p.chips += share + (i === 0 ? remainder : 0);
-    });
-    this.pot = 0;
-    this.lastEvent = `${winnerIds.map((id) => this.players.find((p) => p.id === id)!.name).join('、')} 赢得底池`;
+    if (inHand.length === 1) {
+      const sole = inHand[0]!;
+      sole.chips += this.pot;
+      winners.push(sole.id);
+      this.lastEvent = `${sole.name} 赢得底池 ${this.pot}`;
+    } else {
+      const parts: string[] = [];
+      for (const layer of this.buildSidePots()) {
+        if (layer.eligible.length === 0) {
+          // 死池：退回给出资者
+          const refund = layer.amount / layer.contributors.length;
+          for (const p of layer.contributors) p.chips += refund;
+          continue;
+        }
+        const best = this.bestHands(layer.eligible);
+        const share = Math.floor(layer.amount / best.length);
+        const remainder = layer.amount % best.length;
+        best.forEach((p, i) => {
+          p.chips += share + (i === 0 ? remainder : 0);
+          if (!winners.includes(p.id)) winners.push(p.id);
+        });
+        parts.push(`${best.map((p) => p.name).join('、')} 赢得 ${layer.amount}`);
+      }
+      this.lastEvent = parts.join('；');
+    }
 
-    return { ok: true, finished: true, winnerIds };
+    this.pot = 0;
+    this.winnerIds = winners;
+    return { ok: true, finished: true, winnerIds: winners };
+  }
+
+  /** 按总投入额分层：每层金额 = (本层水位 - 上一层水位) × 出资人数 */
+  private buildSidePots(): {
+    amount: number;
+    contributors: PlayerState[];
+    eligible: PlayerState[];
+  }[] {
+    const inHand = this.playersInHand();
+    const levels = [
+      ...new Set(
+        this.players.filter((p) => p.totalBet > 0).map((p) => p.totalBet),
+      ),
+    ].sort((a, b) => a - b);
+    const layers: {
+      amount: number;
+      contributors: PlayerState[];
+      eligible: PlayerState[];
+    }[] = [];
+    let prev = 0;
+    for (const level of levels) {
+      const contributors = this.players.filter((p) => p.totalBet >= level);
+      const amount = (level - prev) * contributors.length;
+      if (amount > 0) {
+        layers.push({
+          amount,
+          contributors,
+          eligible: inHand.filter((p) => p.totalBet >= level),
+        });
+      }
+      prev = level;
+    }
+    return layers;
+  }
+
+  /** 在候选人中按牌力找最优（可并列） */
+  private bestHands(candidates: PlayerState[]): PlayerState[] {
+    let best: PlayerState[] = [];
+    let bestHand: HandResult | null = null;
+    for (const p of candidates) {
+      const h = evaluateHand(p.cards);
+      if (!bestHand || compareHands(h, bestHand) > 0) {
+        bestHand = h;
+        best = [p];
+      } else if (compareHands(h, bestHand) === 0) {
+        best.push(p);
+      }
+    }
+    return best;
   }
 
   // ── 金额换算（闷/看） ───────────────────────
@@ -592,9 +682,15 @@ export class ZjhEngine {
     );
   }
 
+  /** 找下一位本局能玩的座位（跳过无筹码的旁观者），用于轮转庄家 */
   private nextOccupiedSeat(from: number): number {
-    if (this.players.length === 0) return 0;
-    return (from + 1) % this.players.length;
+    const n = this.players.length;
+    if (n === 0) return 0;
+    for (let i = 1; i <= n; i++) {
+      const seat = (from + i) % n;
+      if (this.players[seat]!.status !== 'out') return seat;
+    }
+    return (from + 1) % n;
   }
 
   private nextActiveSeat(from: number): number {
@@ -621,12 +717,14 @@ export class ZjhEngine {
       lastEvent: this.lastEvent,
       winnerIds: this.winnerIds.length ? [...this.winnerIds] : undefined,
       players: this.players.map((p) => {
-        // 闷牌：未看牌时即使是自己也只显示暗牌；结束/摊牌才全亮
+        // 闷牌：未看牌时即使是自己也只显示暗牌；
+        // 只有打到摊牌才公开所有人手牌，弃牌获胜不亮牌（但自己总能看自己的牌）
         const isViewer = p.id === viewerId;
-        const gameOver =
-          this.phase === 'finished' || this.phase === 'showdown';
+        const revealed =
+          this.phase === 'showdown' ||
+          (this.phase === 'finished' && this.lastHandWentToShowdown);
         const showCards =
-          gameOver || (isViewer && p.looked);
+          revealed || (isViewer && (p.looked || this.phase === 'finished'));
         const view: PublicPlayerView = {
           id: p.id,
           name: p.name,
@@ -647,10 +745,24 @@ export class ZjhEngine {
     };
   }
 
+  /** 测试后门总闸：生产环境禁用 */
+  private assertDebugAllowed(): void {
+    if (typeof process !== 'undefined' && process.env?.NODE_ENV === 'production') {
+      throw new Error('_debug* 方法仅允许在非生产环境使用');
+    }
+  }
+
   /** 仅测试用：直接设置玩家手牌 */
   _debugSetCards(playerId: string, cards: Card[]): void {
+    this.assertDebugAllowed();
     const p = this.players.find((pl) => pl.id === playerId);
     if (p) p.cards = cards;
+  }
+
+  /** 仅测试用：直接设置玩家筹码 */
+  _debugSetChips(playerId: string, chips: number): void {
+    const p = this.players.find((pl) => pl.id === playerId);
+    if (p) p.chips = chips;
   }
 
   getPhase(): GamePhase {
